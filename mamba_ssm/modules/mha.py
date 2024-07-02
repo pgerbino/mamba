@@ -46,17 +46,17 @@ class MHA(nn.Module):
 
     def __init__(
         self,
-        embed_dim,
-        num_heads,
-        num_heads_kv=None,
+        embed_dim, # Hidden dimension
+        num_heads, # Number of heads
+        num_heads_kv=None, # If None, use num_heads
         head_dim=None,  # If None, use embed_dim // num_heads
-        mlp_dim=0,
-        qkv_proj_bias=True,
-        out_proj_bias=True,
-        softmax_scale=None,
-        causal=False,
-        layer_idx=None,
-        d_conv=0,
+        mlp_dim=0, # Feedforward dimension
+        qkv_proj_bias=True, # Whether to use bias in the projection layer
+        out_proj_bias=True, # Whether to use bias in the output projection layer
+        softmax_scale=None, # Scale for the softmax
+        causal=False, # Whether to use causal attention
+        layer_idx=None, # Layer index for inference
+        d_conv=0, # Depthwise convolution kernel size
         rotary_emb_dim=0,
         rotary_emb_base=10000.0,
         rotary_emb_interleaved=False,
@@ -99,12 +99,16 @@ class MHA(nn.Module):
                 device=device,
             )
 
+        # The input projection layer
         self.in_proj = nn.Linear(embed_dim, qkv_dim + self.mlp_dim, bias=qkv_proj_bias, **factory_kwargs)
+        # The depthwise convolution layer
         if self.d_conv > 0:
+            # PG how does Conv1d work?
             self.conv1d = nn.Conv1d(
                 qkv_dim, qkv_dim, kernel_size=self.d_conv, padding=self.d_conv - 1, groups=qkv_dim,
                 **factory_kwargs
             )
+        # The output projection layer
         self.out_proj = nn.Linear(out_dim + self.mlp_dim // 2, embed_dim, bias=out_proj_bias, **factory_kwargs)
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None):

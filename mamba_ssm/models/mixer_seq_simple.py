@@ -25,7 +25,7 @@ try:
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
-
+# PG how is this used? DONE
 def create_block(
     d_model,
     d_intermediate,
@@ -40,19 +40,47 @@ def create_block(
     device=None,
     dtype=None,
 ):
+    """
+    Create a block for the mixer sequence model.
+
+    Args:
+        d_model (int): The dimensionality of the model.
+        d_intermediate (int): The dimensionality of the intermediate layer in the Gated MLP.
+        ssm_cfg (dict, optional): Configuration for the Mamba layer. Defaults to None.
+        attn_layer_idx (list, optional): List of indices of attention layers. Defaults to None.
+        attn_cfg (dict, optional): Configuration for the attention layer. Defaults to None.
+        norm_epsilon (float, optional): Epsilon value for layer normalization. Defaults to 1e-5.
+        rms_norm (bool, optional): Whether to use RMSNorm instead of LayerNorm. Defaults to False.
+        residual_in_fp32 (bool, optional): Whether to use FP32 for residual connections. Defaults to False.
+        fused_add_norm (bool, optional): Whether to use fused add-norm. Defaults to False.
+        layer_idx (int, optional): Index of the layer. Defaults to None.
+        device (str, optional): Device to use for computation. Defaults to None.
+        dtype (str, optional): Data type to use for computation. Defaults to None.
+
+    Returns:
+        block (Block): The created block for the mixer sequence model.
+    """
     if ssm_cfg is None:
         ssm_cfg = {}
+    # If attn_layer_idx is None, then create an empty list
     if attn_layer_idx is None:
         attn_layer_idx = []
     if attn_cfg is None:
         attn_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
+    # Check if the layer is an attention layer
+    # If not, create a Mamba layer
+    # we define the layer we are trying to create
+    # and also know which layers are attention layers
     if layer_idx not in attn_layer_idx:
         # Create a copy of the config to modify
         ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
+        # from the configu get the layer type and default to Mamba1
         ssm_layer = ssm_cfg.pop("layer", "Mamba1")
+        # Check if the layer is valid
         if ssm_layer not in ["Mamba1", "Mamba2"]:
             raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
+        # Create the mixer layer based on either Mamba1 or Mamba2
         mixer_cls = partial(
             Mamba2 if ssm_layer == "Mamba2" else Mamba,
             layer_idx=layer_idx,
@@ -60,24 +88,36 @@ def create_block(
             **factory_kwargs
         )
     else:
+        # Create the attention layer
+        # MHA is the Multi-Head Attention layer
+        # PG how does MHA work?
         mixer_cls = partial(MHA, layer_idx=layer_idx, **attn_cfg, **factory_kwargs)
+
+    # Create the layer norm class
+    # this normalizes the input to the layer
     norm_cls = partial(
         nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
     )
+
+    # If the intermediate layer is 0, then the MLP is an identity function
+    # PG why would you want an identity function?
     if d_intermediate == 0:
         mlp_cls = nn.Identity
     else:
         mlp_cls = partial(
             GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
         )
+    
+    # finally the block is created
     block = Block(
-        d_model,
-        mixer_cls,
-        mlp_cls,
-        norm_cls=norm_cls,
+        d_model, # the dimensionality of the model
+        mixer_cls, # the mixer class
+        mlp_cls, # the mlp class
+        norm_cls=norm_cls, # the normalization class
         fused_add_norm=fused_add_norm,
         residual_in_fp32=residual_in_fp32,
     )
+    # PG if block is created here why does it have a layer_idx? 
     block.layer_idx = layer_idx
     return block
 
@@ -115,28 +155,32 @@ def _init_weights(
                     p /= math.sqrt(n_residuals_per_layer * n_layer)
 
 
+# A nn.Module is a class that inherits from nn.Module
+# This class is a subclass of nn.Module
+# https://pytorch.org/docs/stable/generated/torch.nn.Module.html
 class MixerModel(nn.Module):
     def __init__(
         self,
-        d_model: int,
-        n_layer: int,
-        d_intermediate: int,
-        vocab_size: int,
-        ssm_cfg=None,
-        attn_layer_idx=None,
-        attn_cfg=None,
-        norm_epsilon: float = 1e-5,
-        rms_norm: bool = False,
-        initializer_cfg=None,
-        fused_add_norm=False,
-        residual_in_fp32=False,
-        device=None,
-        dtype=None,
+        d_model: int, # the dimensionality of the model
+        n_layer: int, # the number of layers
+        d_intermediate: int, # the dimensionality of the intermediate layer
+        vocab_size: int, # the size of the vocabulary
+        ssm_cfg=None, # the configuration for the Mamba layer
+        attn_layer_idx=None, # the indices of the attention layers
+        attn_cfg=None, # the configuration for the attention layer
+        norm_epsilon: float = 1e-5, # the epsilon value for layer normalization
+        rms_norm: bool = False, # whether to use RMSNorm instead of LayerNorm
+        initializer_cfg=None, # the configuration for the initializer
+        fused_add_norm=False, # whether to use fused add-norm
+        residual_in_fp32=False, # whether to use FP32 for residual connections
+        device=None,   # the device to use for computation
+        dtype=None,   # the data type to use for computation
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
 
+        # PG what is the purpose of this?
         self.embedding = nn.Embedding(vocab_size, d_model, **factory_kwargs)
 
         # We change the order of residual and layer norm:
@@ -149,6 +193,7 @@ class MixerModel(nn.Module):
             if layer_norm_fn is None or rms_norm_fn is None:
                 raise ImportError("Failed to import Triton LayerNorm / RMSNorm kernels")
 
+        # aha! this is where the layers are created
         self.layers = nn.ModuleList(
             [
                 create_block(
@@ -168,16 +213,24 @@ class MixerModel(nn.Module):
             ]
         )
 
+        # so we have a norm layer for the final output
         self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
             d_model, eps=norm_epsilon, **factory_kwargs
         )
 
+        # Initialize weights and apply final processing
+        # you can see that the weights are initialized here
+        # and the final processing is applied
+        # as we can apply a function to all the layers using a partial function
+        # https://docs.python.org/3/library/functools.html
+        # PG run this code to see what it does
         self.apply(
             partial(
-                _init_weights,
-                n_layer=n_layer,
-                **(initializer_cfg if initializer_cfg is not None else {}),
-                n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # 2 if we have MLP
+                _init_weights, # Initialize weights
+                n_layer=n_layer, # the number of layers
+                **(initializer_cfg if initializer_cfg is not None else {}), # the initializer configuration 
+                # PG what is this?
+                n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # Change to 2 if we have MLP
             )
         )
 
